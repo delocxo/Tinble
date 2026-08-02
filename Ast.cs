@@ -36,4 +36,5 @@ namespace Tinble
     internal record StructStmt(string Name, List<string> Members, Position Position) : Stmt(Position);
     internal record MemberSetStmt(MemberGetExpr MemberGetExpr, Expr Value, Position Position) : Stmt(Position);
     internal record ImportStmt(string FilePath, Position Position) : Stmt(Position);
+    internal record EnumStmt(string Name, List<string> Enums, Position Position) : Stmt(Position);
 }

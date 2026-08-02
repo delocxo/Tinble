@@ -2,6 +2,8 @@
 using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics.Colors;
+using System.Runtime.CompilerServices;
 using System.Text;
 using static System.Runtime.InteropServices.JavaScript.JSType;
 
@@ -55,6 +57,9 @@ public class ValueKeyComparer : IEqualityComparer<Value>
         if (left.Kind == ValueKind.Float && right.Kind == ValueKind.Int)
             return IntEqualsFloat(right.Int, left.Float);
 
+        if (left.Kind == ValueKind.EnumValue && right.Kind == ValueKind.EnumValue)
+            return left.EnumValue.Compare(right.EnumValue);
+
         return false;
     }
 
@@ -79,6 +84,7 @@ public class ValueKeyComparer : IEqualityComparer<Value>
             ValueKind.String => HashCode.Combine(ValueKind.String, StringComparer.Ordinal.GetHashCode(value.String)),
             ValueKind.Int => HashCode.Combine("TinbleNumber", value.Int),
             ValueKind.Float => GetFloatHash(value.Float),
+            ValueKind.EnumValue => value.EnumValue.GetHashCode(),
             _ => throw new UnreachableException()
         };
     }
@@ -228,11 +234,57 @@ public class Dict
     
     void ValidateKey(Value key, Position position)
     {
-        if (key.Kind is not (ValueKind.String or ValueKind.Int or ValueKind.Float))
-            throw new Error("Dict keys must be strings, ints, or floats", position);
+        if (key.Kind is not (ValueKind.String or ValueKind.Int or ValueKind.Float or ValueKind.EnumValue))
+            throw new Error("Dict keys must be strings, ints, floats, or enums", position);
         if (key.Kind == ValueKind.Float && double.IsNaN(key.Float))
             throw new Error("NaN cannot be used as a dict key", position);
     }
+}
+
+public class EnumType
+{
+    public string Name { get; }
+    public FrozenDictionary<string, Value> Members { get; }
+
+    public EnumType(string name, IReadOnlyList<string> memberNanes)
+    {
+        Name = name;
+
+        Members = memberNanes.Select(
+            (member, index) => new KeyValuePair<string, Value>(
+                member, 
+                new Value(new EnumValue(this, member, index))
+            )
+        ).ToFrozenDictionary();
+    }
+}
+
+public class EnumValue
+{
+    public EnumValue(EnumType enumType, string name, int index)
+    {
+        EnumType = enumType;
+        Name = name;
+        Index = index;
+    }
+
+    public bool Compare(EnumValue other)
+    {
+        return ReferenceEquals(EnumType, other.EnumType) && Index == other.Index;
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(
+            RuntimeHelpers.GetHashCode(EnumType),
+            Index
+        );
+    }
+
+
+    public EnumType EnumType { get; }
+    public string Name { get; }
+    public int Index { get; }
 }
 
 public enum ValueKind
@@ -247,7 +299,9 @@ public enum ValueKind
     Namespace,
     StructType,
     StructInstance,
-    Dict
+    Dict,
+    EnumType,
+    EnumValue
 }
 
 public struct Value
@@ -266,6 +320,8 @@ public struct Value
     public StructType StructType => (StructType)Boxed!;
     public StructInstance StructInstance => (StructInstance)Boxed!;
     public Dict Dict => (Dict)Boxed!;
+    public EnumType EnumType => (EnumType)Boxed!;
+    public EnumValue EnumValue => (EnumValue)Boxed!;
 
     #pragma warning disable CS8618 // Non-nullable field must contain a non-null value when exiting constructor. Consider adding the 'required' modifier or declaring as nullable.
     public Value(long value)
@@ -326,6 +382,18 @@ public struct Value
         Boxed = dict;
     }
 
+    public Value(EnumType enumType)
+    {
+        Kind = ValueKind.EnumType;
+        Boxed = enumType;
+    }
+
+    public Value(EnumValue enumValue)
+    {
+        Kind = ValueKind.EnumValue;
+        Boxed = enumValue;
+    }
+
     public Value(ValueKind kind)
     {
         Kind = kind;
@@ -359,6 +427,8 @@ public struct Value
                 return x.ToString();
             }).ToList())} }}",
             ValueKind.Dict => DictToString(),
+            ValueKind.EnumType => EnumType.Name,
+            ValueKind.EnumValue => $"{EnumValue.EnumType.Name}.{EnumValue.Name}",
             _ => "unknown type"
         };
     }
@@ -630,6 +700,46 @@ public static class Natives
             )
         );
 
+        @namespace["generate"] = new Value(
+            new Function(
+                2,
+                (args, pos) =>
+                {
+                    if (args.Length == 0)
+                        return new Value(new List<Value>());
+
+                    Value count = args[0]
+                        .Expect(ValueKind.Int, "Expected int count", pos);
+
+                    if (count.Int < 0)
+                        throw new Error("Count cannot be negative", pos);
+
+                    if (count.Int > int.MaxValue)
+                        throw new Error("Count is too large", pos);
+
+                    Function function = args[1]
+                        .Expect(ValueKind.Function, "Expected a generator function", pos)
+                        .Function;
+
+                    RuntimeOperations.CheckArgs(function, 1, pos);
+
+                    int actualCount = (int)count.Int;
+
+                    List<Value> values = new List<Value>(actualCount);
+
+                    for (int i = 0; i < actualCount; i++)
+                    {
+                        Value generated = function.Delegate([new Value(i)], pos);
+                        values.Add(generated);
+                    }
+
+                    return new Value(values);
+                },
+                "generate",
+                ArgMode.Expected
+            )
+        );
+
         return new Value(@namespace);
     }
 
@@ -796,6 +906,14 @@ public static class RuntimeOperations
         Globals.Add(structType.Name, new Value(structType));
     }
 
+    public static void RegisterEnum(EnumType enumType, Position position)
+    {
+        if (Globals.TryGetValue(enumType.Name, out Value value))
+            if (value.Kind == ValueKind.StructType)
+                throw new Error($"'{enumType.Name}' is an already existing enum", position);
+        Globals.Add(enumType.Name, new Value(enumType));
+    }
+
     public static Value Add(Value left, Value right, Position position)
     {
         return (left.Kind, right.Kind) switch
@@ -939,6 +1057,8 @@ public static class RuntimeOperations
             (ValueKind.StructType, ValueKind.StructType) => new Value(left.StructType == right.StructType),
             (ValueKind.StructInstance, ValueKind.StructInstance) => new Value(left.StructInstance == right.StructInstance),
             (ValueKind.Dict, ValueKind.Dict) => new Value(left.Dict == right.Dict),
+            (ValueKind.EnumType, ValueKind.EnumType) => new Value(left.EnumType == right.EnumType),
+            (ValueKind.EnumValue, ValueKind.EnumValue) => new Value(left.EnumValue.Compare(right.EnumValue)),
             _ => new Value(false)
         };
     }
@@ -1532,6 +1652,21 @@ public static class RuntimeOperations
                 return CreatRegisterFunction(target.StructType);
             throw new Error($"Struct '{target.StructType.Name}' does not have member '{name}'", position);
         }
+        else if (target.Kind == ValueKind.EnumType)
+        {
+            if (target.EnumType.Members.TryGetValue(name, out Value enumValue))
+                return enumValue;
+            throw new Error($"{target.EnumType.Name} does not contain enum value '{name}'", position);
+        }
+        else if (target.Kind == ValueKind.EnumValue)
+        {
+            return name switch
+            {
+                "name" => new Value(target.EnumValue.Name),
+                "index" => new Value(target.EnumValue.Index),
+                _ => throw new Error($"EnumValue does not contain member '{name}'", position)
+            };
+        }
         throw new Error($"Type {target.Kind} cannot be member accessed", position);
     }
 
@@ -1688,23 +1823,7 @@ public static class RuntimeOperations
         {
             Function function = target.Function;
 
-            switch (function.ArgMode)
-            {
-                case ArgMode.Expected:
-                    if (function.Arity != args.Length)
-                        throw new Error($"'{function.Name}' expects {function.Arity} argument(s), got {args.Length}", position);
-                    break;
-
-                case ArgMode.Minimum:
-                    if (args.Length < function.Arity)
-                        throw new Error($"'{function.Name}' expects atleast {function.Arity} argument(s), got {args.Length}", position);
-                    break;
-
-                case ArgMode.Range:
-                    if (args.Length < function.Arity || args.Length > function.MaxArity)
-                        throw new Error($"'{function.Name}' expects between {function.Arity} and {function.MaxArity} arguments, got {args.Length}", position);
-                    break;
-            }
+            CheckArgs(function, args.Length, position);
 
             return function.Delegate(args, position);
         }
@@ -1718,6 +1837,27 @@ public static class RuntimeOperations
             return new Value(new StructInstance(structType, args));
         }
         throw new Error($"{target.Kind} is not callable", position);
+    }
+
+    public static void CheckArgs(Function function, int got, Position position)
+    {
+        switch (function.ArgMode)
+        {
+            case ArgMode.Expected:
+                if (function.Arity != got)
+                    throw new Error($"'{function.Name}' expects {function.Arity} argument(s), got {got}", position);
+                break;
+
+            case ArgMode.Minimum:
+                if (got < function.Arity)
+                    throw new Error($"'{function.Name}' expects atleast {function.Arity} argument(s), got {got}", position);
+                break;
+
+            case ArgMode.Range:
+                if (got < function.Arity || got > function.MaxArity)
+                    throw new Error($"'{function.Name}' expects between {function.Arity} and {function.MaxArity} arguments, got {got}", position);
+                break;
+        }
     }
 }
 

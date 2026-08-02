@@ -27,6 +27,7 @@ namespace Tinble
             { "in", TokenType.In },
             { "import", TokenType.Import },
             { "dict", TokenType.Dict },
+            { "enum", TokenType.Enum }
         };
 
         public static Dictionary<string, TokenType> Symbols { get; } = new Dictionary<string, TokenType>()

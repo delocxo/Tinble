@@ -79,6 +79,12 @@ namespace Tinble
 
                 return new StructStmt(name, members, position);
             }
+            else if (Match(TokenType.Enum))
+            {
+                List<string> enums = ParseFuncArgs(TokenType.LeftBrace, TokenType.RightBrace);
+
+                return new EnumStmt(name, enums, position);
+            }
                 
             throw new Error("Invalid make statement", position);
         }

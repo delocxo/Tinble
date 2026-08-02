@@ -21,7 +21,7 @@ namespace Tinble
         public StringBuilder StringBuilder { get; } = new StringBuilder();
         public Stack<Dictionary<string, string>> Scopes { get; } = new Stack<Dictionary<string, string>>();
         public Dictionary<string, int> NextLocalIndexs { get; } = new Dictionary<string, int>();
-        public Dictionary<string, FunctionInfo> Functions { get; } = new Dictionary<string, FunctionInfo>();
+        public Dictionary<string, Dictionary<int, FunctionInfo>> Functions { get; } = new Dictionary<string, Dictionary<int, FunctionInfo>>();
 
         int _indentSize = 4;
         int _indexLevel = 2;
@@ -31,6 +31,7 @@ namespace Tinble
         int _nextAnonymousId = 0;
         Dictionary<string, string> _structs = [];
         Dictionary<string, bool> _compileFiles = [];
+        Dictionary<string, string> _enums = [];
         
         public Compiler(string runtimeText)
         {
@@ -82,16 +83,22 @@ namespace Tinble
             foreach (Stmt stmt in ast)
                 if (stmt is FuncStmt funcStmt)
                 {
-                    if (Functions.ContainsKey(funcStmt.Name))
-                        throw new Error($"'{funcStmt.Name}' already exist", funcStmt.Position);
-                    Functions.Add(funcStmt.Name, new FunctionInfo($"_{funcStmt.Name}_", funcStmt.Args.Count));
+                    FunctionInfo function = new FunctionInfo($"_{funcStmt.Name}_{funcStmt.Args.Count}", funcStmt.Args.Count);
+                    if (Functions.TryGetValue(funcStmt.Name, out var overloads))
+                    {
+                        if (overloads.ContainsKey(funcStmt.Args.Count))
+                            throw new Error($"'{funcStmt.Name}' with {funcStmt.Args.Count} argument(s) already exist", funcStmt.Position);
+                        overloads.Add(funcStmt.Args.Count, function);
+                        continue;
+                    }
+                    Functions.Add(funcStmt.Name, new Dictionary<int, FunctionInfo>() { {funcStmt.Args.Count, function} });
                 }
                 else if (stmt is ImportStmt importStmt)
                     CompileFile(importStmt.FilePath, false, importStmt.Position);
 
             foreach (Stmt stmt in ast)
             {
-                if (!isEntry && stmt is not (FuncStmt or ImportStmt or StructStmt))
+                if (!isEntry && stmt is not (FuncStmt or ImportStmt or StructStmt or EnumStmt))
                     throw new Error($"Top-level executable statements are not allowed in imported file '{source}'", stmt.Position);
                 CompileStmt(stmt);
             }
@@ -108,9 +115,9 @@ namespace Tinble
                         if (Scopes.Count > 1)
                             throw new Error("Function cannot be declared at the local scope", funcStmt.Position);
 
-                        VerfiyStringArguments(funcStmt.Args, "Found duplicate function arguments", funcStmt.Position);
+                        VerfiyStringArguments(funcStmt.Args, (member) => $"'{member}' is a duplicate function arguments", funcStmt.Position);
 
-                        string csharpName = Functions[funcStmt.Name].Name;
+                        string csharpName = Functions[funcStmt.Name][funcStmt.Args.Count].Name;
 
                         bool wasInLoop = _inLoop;
 
@@ -341,6 +348,24 @@ namespace Tinble
                         EmitLine($"{RuntimeOpToString("MemberSet", $"{target}, {value}, \"{memberGetExpr.Name}\"", memberGetExpr.Position)};");
                         break;
                     }
+
+                case EnumStmt enumStmt:
+                    {
+                        if (Scopes.Count > 1)
+                            throw new Error("Enum cannot be declared at the local scope", enumStmt.Position);
+
+                        if (_structs.ContainsKey(enumStmt.Name))
+                            throw new Error($"Enum '{enumStmt.Name}' already exist", enumStmt.Position);
+
+                        VerfiyStringArguments(enumStmt.Enums, (member) => $"'{member}' is a duplicate enum value", enumStmt.Position);
+
+                        List<string> enumValues = enumStmt.Enums.Select((member) => $"\"{member}\"").ToList();
+
+                        string structDict = $"new List<string>() {{ {string.Join(", ", enumValues)} }}";
+
+                        EmitLine($"{RuntimeOpToString("RegisterEnum", $"new EnumType(\"{enumStmt.Name}\", {structDict})", enumStmt.Position)};");
+                        break;
+                    }
             }
         }
 
@@ -393,8 +418,15 @@ namespace Tinble
 
                 case NameExpr nameExpr:
                     {
-                        if (Functions.TryGetValue(nameExpr.Name, out FunctionInfo? functionInfo))
-                            return $"new Value(new Function({functionInfo.Arity}, {functionInfo.Name}, \"{nameExpr.Name}\", ArgMode.Expected))";
+                        if (Functions.TryGetValue(nameExpr.Name, out var overloads))
+                        {
+                            if (overloads.Count == 1)
+                            {
+                                FunctionInfo functionInfo = overloads.First().Value;
+                                return $"new Value(new Function({functionInfo.Arity}, {functionInfo.Name}, \"{nameExpr.Name}\", ArgMode.Expected))";
+                            }
+                            throw new Error($"Cannot use overloaded function '{nameExpr.Name}' as a value", nameExpr.Position);
+                        }
 
                         if (TryResolveLocal(nameExpr.Name, out string? local))
                             return $"{local}";
@@ -413,6 +445,11 @@ namespace Tinble
 
                 case CallExpr callExpr:
                     {
+                        if (callExpr.Callee is NameExpr nameExpr && Functions.ContainsKey(nameExpr.Name))
+                        {
+                            FunctionInfo functionInfo = ResolveOverload(nameExpr.Name, callExpr.Arguments.Count, callExpr.Position);
+                            return FunctionInfoToString(functionInfo, nameExpr.Name);
+                        }
                         string callee = CompileExpr(callExpr.Callee);
                         string args = string.Join(", ", callExpr.Arguments.Select(CompileExpr));
                         return RuntimeOpToString("Call", $"{callee}, [{args}]", callExpr.Position);
@@ -447,7 +484,7 @@ namespace Tinble
                 case FuncExpr funcExpr:
                     {
                    
-                       VerfiyStringArguments(funcExpr.Args, "Found duplicate anonymous function arguments", funcExpr.Position);
+                       VerfiyStringArguments(funcExpr.Args, (arg) => $"'{arg}' is duplicate anonymous function arg", funcExpr.Position);
 
                        int id = _nextAnonymousId++;
                        string name = $"Anonymous{id}";
@@ -590,12 +627,22 @@ namespace Tinble
         string RuntimeOpToString(string name, string data) =>
             $"RuntimeOperations.{name}({data})";
 
-        void VerfiyStringArguments(List<string> strings, string message, Position position)
+        void VerfiyStringArguments(List<string> strings, Func<string, string> message, Position position)
         {
             HashSet<string> hashSet = new HashSet<string>();
             for (int i = 0; i < strings.Count; i++)
                 if (!hashSet.Add(strings[i]))
-                    throw new Error(message, position);
+                    throw new Error(message(strings[i]), position);
         }
+
+        FunctionInfo ResolveOverload(string name, int arity, Position position)
+        {
+            Functions.TryGetValue(name, out var overloads);
+            if (!overloads!.TryGetValue(arity, out FunctionInfo? functionInfo))
+                throw new Error("No overload of '{name}' accepts {arity} argument(s)", position);
+            return functionInfo;
+        }
+
+        string FunctionInfoToString(FunctionInfo functionInfo, string name) => $"new Value(new Function({functionInfo.Arity}, {functionInfo.Name}, \"{name}\", ArgMode.Expected))"; 
     }
 }

@@ -11,6 +11,7 @@ namespace Tinble
 
         Make, If, Else, Elseif, While, Break,
         Continue, Return, For, In, Import, Dict,
+        Enum,
 
         Add, Sub, Mul, Div, Mod, Less, Greater,
         LessEq, GreaterEq, Equals, NotEquals,
