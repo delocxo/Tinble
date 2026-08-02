@@ -451,6 +451,16 @@ namespace Tinble
                 Next();
                 return new NameExpr("dict", token.Position);
             }
+            else if (Match(TokenType.Make))
+            {
+                if (Check(TokenType.LeftParen))
+                {
+                    List<string> args = ParseFuncArgs(TokenType.LeftParen, TokenType.RightParen);
+                    List<Stmt> body = ParseBody();
+                    return new FuncExpr(args, body, token.Position);
+                }
+                throw new Error("Invalid use of make", token.Position);
+            }
 
             throw new Error("Invalid expression", token.Position);
         }

@@ -17,6 +17,7 @@ namespace Tinble
     internal record IndexGetExpr(Expr Target, Expr Index, Position Position) : Expr(Position);
     internal record MemberGetExpr(Expr Target, string Name, Position Position) : Expr(Position);
     internal record DictExpr(List<KeyValuePair<Expr, Expr>> KeyValuePairs, Position Position) : Expr(Position);
+    internal record FuncExpr(List<string> Args, List<Stmt> Body, Position Position) : Expr(Position);
     internal record BinaryExpr(Expr Left, Expr Right, TokenType Op, Position Position) : Expr(Position);
 
     internal abstract record Stmt(Position Position);

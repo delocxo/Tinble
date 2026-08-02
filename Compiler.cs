@@ -28,6 +28,7 @@ namespace Tinble
         bool _inLoop = false;
         bool _inFunction = false;
         int _nextForId = 0;
+        int _nextAnonymousId = 0;
         Dictionary<string, string> _structs = [];
         Dictionary<string, bool> _compileFiles = [];
         
@@ -106,6 +107,8 @@ namespace Tinble
                     {
                         if (Scopes.Count > 1)
                             throw new Error("Function cannot be declared at the local scope", funcStmt.Position);
+
+                        VerfiyStringArguments(funcStmt.Args, "Found duplicate function arguments", funcStmt.Position);
 
                         string csharpName = Functions[funcStmt.Name].Name;
 
@@ -441,6 +444,47 @@ namespace Tinble
                         return Runtime.NewValue($"new Dict({listOfKeyValues}, {Runtime.PosToString(dictExpr.Position)})"); 
                     }
 
+                case FuncExpr funcExpr:
+                    {
+                   
+                       VerfiyStringArguments(funcExpr.Args, "Found duplicate anonymous function arguments", funcExpr.Position);
+
+                       int id = _nextAnonymousId++;
+                       string name = $"Anonymous{id}";
+                       string csharpName = $"__anonymous_{id}";
+                       bool wasInLoop = _inLoop;
+
+                       _inLoop = false;
+                       _inFunction = true;
+                       EmitLine($"FunctionDelegate {csharpName} = (args, pos) => ");
+                       EmitLine("{");
+                       BeginScope();
+
+                       for (int i = 0; i < funcExpr.Args.Count; i++)
+                       {
+                           string arg = funcExpr.Args[i];
+                           string argCsharpName = SetLocal(arg, funcExpr.Position);
+                           EmitLine($"Value {argCsharpName} = args[{i}];");
+                       }
+
+                       foreach (Stmt bodyStmt in funcExpr.Body)
+                           CompileStmt(bodyStmt);
+
+                       if (funcExpr.Body.Count == 0 || funcExpr.Body.Last() is not ReturnStmt)
+                           EmitLine("return Value.Null();");
+
+                       if (funcExpr.Body.Last() is ReturnStmt returnStmt && returnStmt.Condition != null)
+                           EmitLine("return Value.Null();");
+
+                       EndScope();
+                       EmitLine("};");
+
+                       _inLoop = wasInLoop;
+                       _inFunction = false;
+
+                        return $"new Value(new Function({funcExpr.Args.Count}, {csharpName}, \"{name}\", ArgMode.Expected))";
+                    }
+
                 case BinaryExpr binaryExpr:
                     {
                         string left = CompileExpr(binaryExpr.Left);
@@ -545,5 +589,13 @@ namespace Tinble
 
         string RuntimeOpToString(string name, string data) =>
             $"RuntimeOperations.{name}({data})";
+
+        void VerfiyStringArguments(List<string> strings, string message, Position position)
+        {
+            HashSet<string> hashSet = new HashSet<string>();
+            for (int i = 0; i < strings.Count; i++)
+                if (!hashSet.Add(strings[i]))
+                    throw new Error(message, position);
+        }
     }
 }
